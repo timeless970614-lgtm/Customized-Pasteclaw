@@ -116,7 +116,11 @@
     "updateAvailable": "Update available! Version {{version}}",
     "noUpdates": "You're on the latest version",
     "updateError": "Failed to check for updates",
-    "copyContent": "Copy content"
+    "copyContent": "Copy content",
+    "pasteAllHotkey": "Paste All Hotkey",
+    "pasteAllHotkeyDesc": "Shortcut to paste all clipboard history at once",
+    "pasteAllSeparator": "Paste All Separator",
+    "pasteAllSeparatorDesc": "Separator between items when pasting all (use \\n for newline)"
   },
   "ai": {
     "processing": "Processing with AI...",

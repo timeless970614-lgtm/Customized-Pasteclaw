@@ -33,6 +33,10 @@ pub struct AppSettings {
     pub ai_title_explain_code: String,
     pub ai_title_fix_grammar: String,
 
+    // Paste All
+    pub paste_all_hotkey: String,
+    pub paste_all_separator: String,
+
     // Privacy
     pub ignored_apps: HashSet<String>,
 }
@@ -66,6 +70,9 @@ impl Default for AppSettings {
             ai_title_translate: "Translate".to_string(),
             ai_title_explain_code: "Explain Code".to_string(),
             ai_title_fix_grammar: "Fix Grammar".to_string(),
+
+            paste_all_hotkey: "Ctrl+Shift+A".to_string(),
+            paste_all_separator: "\n".to_string(),
 
             ignored_apps: HashSet::new(),
         }

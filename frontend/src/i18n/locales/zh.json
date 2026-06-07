@@ -116,7 +116,11 @@
     "updateAvailable": "有可用更新！版本 {{version}}",
     "noUpdates": "您使用的是最新版本",
     "updateError": "检查更新失败",
-    "copyContent": "复制内容"
+    "copyContent": "复制内容",
+    "pasteAllHotkey": "一键全粘快捷键",
+    "pasteAllHotkeyDesc": "按下后自动合并所有剪贴板历史并粘贴",
+    "pasteAllSeparator": "全粘分隔符",
+    "pasteAllSeparatorDesc": "合并粘贴时各项之间的分隔符（用 \\n 表示换行）"
   },
   "ai": {
     "processing": "AI 处理中...",

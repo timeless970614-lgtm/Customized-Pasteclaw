@@ -44,6 +44,8 @@ export interface Settings {
   ai_title_translate?: string;
   ai_title_explain_code?: string;
   ai_title_fix_grammar?: string;
+  paste_all_hotkey?: string;
+  paste_all_separator?: string;
 }
 
 export type ClipType = 'text' | 'image' | 'html' | 'rtf' | 'file' | 'url';

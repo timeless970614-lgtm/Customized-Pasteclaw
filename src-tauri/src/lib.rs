@@ -6,12 +6,13 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
-    Manager,
+    Emitter, Manager,
 };
 use tauri_plugin_aptabase::EventTracker;
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_clipboard_x::{start_listening, stop_listening, write_text};
 
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
@@ -315,6 +316,82 @@ pub fn run_app() {
                 log::error!("Failed to parse hotkey: {}", saved_hotkey);
             }
 
+            // Register paste_all_hotkey
+            let saved_paste_all_hotkey = manager.get().paste_all_hotkey.clone();
+            log::info!("Registering paste_all_hotkey: {}", saved_paste_all_hotkey);
+
+            if let Ok(paste_all_shortcut) = Shortcut::from_str(&saved_paste_all_hotkey) {
+                let app_for_paste_all = app_handle.clone();
+                let db_for_paste_all = db_arc.clone();
+                let _ = app_handle.global_shortcut().on_shortcut(paste_all_shortcut, move |_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        log::info!("paste_all_hotkey pressed");
+                        let app = app_for_paste_all.clone();
+                        let db = db_for_paste_all.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let win = app.get_webview_window("main");
+                            if let Some(_window) = win {
+                                // Directly call the logic instead of the tauri command
+                                let pool = &db.pool;
+
+                                let clips: Vec<crate::models::Clip> = sqlx::query_as(
+                                    r#"SELECT * FROM clips WHERE is_deleted = 0 AND clip_type = 'text' ORDER BY created_at ASC"#,
+                                )
+                                .fetch_all(pool)
+                                .await
+                                .unwrap_or_default();
+
+                                if clips.is_empty() {
+                                    log::warn!("paste_all: no text clips found");
+                                    return;
+                                }
+
+                                let manager = app.state::<Arc<SettingsManager>>();
+                                let separator = manager.get().paste_all_separator.clone();
+
+                                let merged: String = clips
+                                    .iter()
+                                    .map(|c| String::from_utf8_lossy(&c.content).to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(&separator);
+
+                                let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+
+                                let content_hash = crate::clipboard::calculate_hash(merged.as_bytes());
+                                crate::clipboard::set_ignore_hash(content_hash);
+
+                                if let Err(e) = stop_listening().await {
+                                    log::error!("Failed to stop listener: {}", e);
+                                }
+
+                                let mut success = false;
+                                for i in 0..5 {
+                                    match write_text(merged.clone()).await {
+                                        Ok(_) => { success = true; break; }
+                                        Err(e) => {
+                                            log::warn!("Clipboard write (paste_all) attempt {} failed: {}", i + 1, e);
+                                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        }
+                                    }
+                                }
+
+                                let app_clone = app.clone();
+                                if let Err(e) = start_listening(app_clone).await {
+                                    log::error!("Failed to restart listener: {}", e);
+                                }
+
+                                if success {
+                                    let _ = app.emit("clipboard-write", &merged);
+                                    crate::clipboard::send_paste_input();
+                                }
+                            }
+                        });
+                    }
+                });
+            } else {
+                log::warn!("Failed to parse paste_all_hotkey: {}", saved_paste_all_hotkey);
+            }
+
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();
             clipboard::init(&handle_for_clip, db_for_clip);
@@ -360,7 +437,8 @@ pub fn run_app() {
             commands::test_log,
             commands::ai_process_clip,
             commands::focus_window,
-            commands::refresh_window
+            commands::refresh_window,
+            commands::paste_all_clips
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

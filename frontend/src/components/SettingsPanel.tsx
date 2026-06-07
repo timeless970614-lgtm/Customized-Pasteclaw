@@ -102,6 +102,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [settings, setSettings] = useState<Settings>(initialSettings);
   const [_historySize, setHistorySize] = useState<number>(0);
   const [isRecordingMode, setIsRecordingMode] = useState(false);
+  const [isRecordingPasteAll, setIsRecordingPasteAll] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [localApiKey, setLocalApiKey] = useState(initialSettings.ai_api_key || '');
   const [localBaseUrl, setLocalBaseUrl] = useState(initialSettings.ai_base_url || '');
@@ -133,6 +134,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
 
           if (updates.hotkey) {
             await invoke('register_global_shortcut', { hotkey: updates.hotkey });
+          }
+          if (updates.paste_all_hotkey) {
+            // Re-register shortcuts when paste_all_hotkey changes
+            await invoke('register_global_shortcut', { hotkey: newSettings.hotkey });
           }
           if ('round_corners' in updates || 'mica_effect' in updates || 'float_above_taskbar' in updates) {
             await invoke('refresh_window');
@@ -349,6 +354,23 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     stopRecordingLib();
     clearLastRecording();
     setIsRecordingMode(false);
+    setIsRecordingPasteAll(false);
+  };
+
+  const handleStartPasteAllRecording = () => {
+    setIsRecordingMode(true);
+    setIsRecordingPasteAll(true);
+    startRecordingLib();
+  };
+
+  const handleSavePasteAllHotkey = async () => {
+    if (savedShortcut.length > 0) {
+      const newHotkey = formatHotkey(savedShortcut);
+      await updateSetting('paste_all_hotkey', newHotkey);
+    }
+    stopRecordingLib();
+    setIsRecordingMode(false);
+    setIsRecordingPasteAll(false);
   };
 
   const handleCheckUpdate = async () => {
@@ -613,7 +635,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <span className="text-sm font-medium">{t('settings.hotkey')}</span>
                         <p className="text-xs text-muted-foreground">{t('settings.hotkeyDesc')}</p>
                       </label>
-                      {isRecordingMode ? (
+                      {isRecordingMode && !isRecordingPasteAll ? (
                         <div className="space-y-2">
                           <div className="flex w-full items-center gap-2 rounded-lg border border-primary bg-input px-3 py-2 text-sm ring-2 ring-primary">
                             <span className="animate-pulse text-primary">
@@ -650,6 +672,66 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           </span>
                         </button>
                       )}
+                    </div>
+
+                    {/* Paste All Hotkey */}
+                    <div className="space-y-3">
+                      <label className="block">
+                        <span className="text-sm font-medium">{t('settings.pasteAllHotkey')}</span>
+                        <p className="text-xs text-muted-foreground">{t('settings.pasteAllHotkeyDesc')}</p>
+                      </label>
+                      {isRecordingMode && isRecordingPasteAll ? (
+                        <div className="space-y-2">
+                          <div className="flex w-full items-center gap-2 rounded-lg border border-primary bg-input px-3 py-2 text-sm ring-2 ring-primary">
+                            <span className="animate-pulse text-primary">
+                              {shortcut.length > 0
+                                ? formatHotkey(shortcut)
+                                : savedShortcut.length > 0
+                                  ? formatHotkey(savedShortcut)
+                                  : t('settings.hotkeyRecording')}
+                            </span>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={handleSavePasteAllHotkey}
+                              disabled={savedShortcut.length === 0}
+                              className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50"
+                            >
+                              {t('common.save')}
+                            </button>
+                            <button
+                              onClick={handleCancelRecording}
+                              className="rounded bg-muted px-3 py-1 text-xs text-muted-foreground"
+                            >
+                              {t('common.cancel')}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={handleStartPasteAllRecording}
+                          className="flex w-full items-center gap-2 rounded-lg border border-border bg-input px-3 py-2 text-sm transition-colors hover:border-primary"
+                        >
+                          <span className="rounded bg-accent px-2 py-0.5 font-mono text-xs font-medium">
+                            {settings.paste_all_hotkey || 'Ctrl+Shift+A'}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Paste All Separator */}
+                    <div className="space-y-3">
+                      <label className="block">
+                        <span className="text-sm font-medium">{t('settings.pasteAllSeparator')}</span>
+                        <p className="text-xs text-muted-foreground">{t('settings.pasteAllSeparatorDesc')}</p>
+                      </label>
+                      <input
+                        type="text"
+                        value={settings.paste_all_separator ?? '\\n'}
+                        onChange={(e) => updateSetting('paste_all_separator', e.target.value)}
+                        className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="\n"
+                      />
                     </div>
                   </section>
 

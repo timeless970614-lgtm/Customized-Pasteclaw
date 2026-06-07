@@ -1003,6 +1003,7 @@ pub async fn register_global_shortcut(
         .get_webview_window("main")
         .ok_or_else(|| "Main window not found".to_string())?;
 
+    // Register main hotkey
     let win_clone = main_window.clone();
     if let Err(e) = app
         .global_shortcut()
@@ -1017,6 +1018,76 @@ pub async fn register_global_shortcut(
         })
     {
         return Err(format!("Failed to register hotkey: {:?}", e));
+    }
+
+    // Re-register paste_all_hotkey
+    let manager = app.state::<Arc<crate::settings_manager::SettingsManager>>();
+    let paste_all_hotkey = manager.get().paste_all_hotkey.clone();
+    log::info!("Re-registering paste_all_hotkey: {}", paste_all_hotkey);
+
+    if let Ok(paste_all_shortcut) = Shortcut::from_str(&paste_all_hotkey) {
+        let app_for_paste_all = app.clone();
+        let db_for_paste_all: Arc<crate::database::Database> = app.state::<Arc<crate::database::Database>>().inner().clone();
+        let _ = app.global_shortcut().on_shortcut(paste_all_shortcut, move |_app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                log::info!("paste_all_hotkey pressed");
+                let app = app_for_paste_all.clone();
+                let db = db_for_paste_all.clone();
+                tauri::async_runtime::spawn(async move {
+                    let pool = &db.pool;
+                    let clips: Vec<crate::models::Clip> = sqlx::query_as(
+                        r#"SELECT * FROM clips WHERE is_deleted = 0 AND clip_type = 'text' ORDER BY created_at ASC"#,
+                    )
+                    .fetch_all(pool)
+                    .await
+                    .unwrap_or_default();
+
+                    if clips.is_empty() {
+                        log::warn!("paste_all: no text clips found");
+                        return;
+                    }
+
+                    let manager = app.state::<Arc<crate::settings_manager::SettingsManager>>();
+                    let separator = manager.get().paste_all_separator.clone();
+
+                    let merged: String = clips
+                        .iter()
+                        .map(|c| String::from_utf8_lossy(&c.content).to_string())
+                        .collect::<Vec<String>>()
+                        .join(&separator);
+
+                    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+
+                    let content_hash = crate::clipboard::calculate_hash(merged.as_bytes());
+                    crate::clipboard::set_ignore_hash(content_hash);
+
+                    if let Err(e) = stop_listening().await {
+                        log::error!("Failed to stop listener: {}", e);
+                    }
+
+                    let mut success = false;
+                    for i in 0..5 {
+                        match write_text(merged.clone()).await {
+                            Ok(_) => { success = true; break; }
+                            Err(e) => {
+                                log::warn!("Clipboard write (paste_all) attempt {} failed: {}", i + 1, e);
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
+                    }
+
+                    let app_clone = app.clone();
+                    if let Err(e) = start_listening(app_clone).await {
+                        log::error!("Failed to restart listener: {}", e);
+                    }
+
+                    if success {
+                        let _ = app.emit("clipboard-write", &merged);
+                        crate::clipboard::send_paste_input();
+                    }
+                });
+            }
+        });
     }
 
     log::info!("Registered global shortcut: {}", hotkey);
@@ -1083,5 +1154,95 @@ pub fn get_layout_config() -> serde_json::Value {
     serde_json::json!({
         "window_height": crate::constants::WINDOW_HEIGHT,
     })
+}
+
+#[tauri::command]
+pub async fn paste_all_clips(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    let pool = &db.pool;
+
+    // Get all non-deleted text clips ordered by created_at (oldest first, so paste order is chronological)
+    let clips: Vec<Clip> = sqlx::query_as(
+        r#"SELECT * FROM clips WHERE is_deleted = 0 AND clip_type = 'text' ORDER BY created_at ASC"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if clips.is_empty() {
+        return Err("No text clips to paste".to_string());
+    }
+
+    // Get the separator from settings
+    let manager = app.state::<Arc<SettingsManager>>();
+    let settings = manager.get();
+    let separator = settings.paste_all_separator.clone();
+
+    // Merge all text content with separator
+    let merged: String = clips
+        .iter()
+        .map(|c| String::from_utf8_lossy(&c.content).to_string())
+        .collect::<Vec<String>>()
+        .join(&separator);
+
+    // Synchronize clipboard access
+    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+
+    // Compute hash of merged content for ignore
+    let content_hash = crate::clipboard::calculate_hash(merged.as_bytes());
+    crate::clipboard::set_ignore_hash(content_hash);
+
+    // Stop monitor
+    if let Err(e) = stop_listening().await {
+        log::error!("Failed to stop listener: {}", e);
+    }
+
+    // Write merged text to clipboard with retry
+    let mut final_res = Ok(());
+    let mut last_err = String::new();
+    for i in 0..5 {
+        match write_text(merged.clone()).await {
+            Ok(_) => {
+                last_err.clear();
+                break;
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                log::warn!(
+                    "Clipboard write (paste_all) attempt {} failed: {}. Retrying...",
+                    i + 1,
+                    last_err
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    if !last_err.is_empty() {
+        final_res = Err(format!("Failed to set clipboard text: {}", last_err));
+    }
+
+    // Restart monitor
+    let app_clone = app.clone();
+    if let Err(e) = start_listening(app_clone).await {
+        log::error!("Failed to restart listener: {}", e);
+    }
+
+    if final_res.is_ok() {
+        let _ = window.emit("clipboard-write", &merged);
+
+        // Check auto_paste setting — always auto-paste for paste_all
+        crate::animate_window_hide(
+            &window,
+            Some(Box::new(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                crate::clipboard::send_paste_input();
+            })),
+        );
+    }
+
+    final_res
 }
 
