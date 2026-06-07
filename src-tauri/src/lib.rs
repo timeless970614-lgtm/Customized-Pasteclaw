@@ -6,13 +6,13 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
-    Emitter, Manager,
+    Manager,
 };
 use tauri_plugin_aptabase::EventTracker;
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use tauri_plugin_clipboard_x::{start_listening, stop_listening, write_text};
+use tauri_plugin_clipboard_x::{start_listening, stop_listening, write_image, write_text};
 
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
@@ -331,58 +331,93 @@ pub fn run_app() {
                         tauri::async_runtime::spawn(async move {
                             let win = app.get_webview_window("main");
                             if let Some(_window) = win {
-                                // Directly call the logic instead of the tauri command
                                 let pool = &db.pool;
 
+                                // Get all non-deleted clips (text + image)
                                 let clips: Vec<crate::models::Clip> = sqlx::query_as(
-                                    r#"SELECT * FROM clips WHERE is_deleted = 0 AND clip_type = 'text' ORDER BY created_at ASC"#,
+                                    r#"SELECT * FROM clips WHERE is_deleted = 0 ORDER BY created_at ASC"#,
                                 )
                                 .fetch_all(pool)
                                 .await
                                 .unwrap_or_default();
 
                                 if clips.is_empty() {
-                                    log::warn!("paste_all: no text clips found");
+                                    log::warn!("paste_all: no clips found");
                                     return;
                                 }
 
-                                let manager = app.state::<Arc<SettingsManager>>();
-                                let separator = manager.get().paste_all_separator.clone();
-
-                                let merged: String = clips
-                                    .iter()
-                                    .map(|c| String::from_utf8_lossy(&c.content).to_string())
-                                    .collect::<Vec<String>>()
-                                    .join(&separator);
-
-                                let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
-
-                                let content_hash = crate::clipboard::calculate_hash(merged.as_bytes());
-                                crate::clipboard::set_ignore_hash(content_hash);
-
+                                // Stop monitor once before the sequence
                                 if let Err(e) = stop_listening().await {
                                     log::error!("Failed to stop listener: {}", e);
                                 }
 
-                                let mut success = false;
-                                for i in 0..5 {
-                                    match write_text(merged.clone()).await {
-                                        Ok(_) => { success = true; break; }
-                                        Err(e) => {
-                                            log::warn!("Clipboard write (paste_all) attempt {} failed: {}", i + 1, e);
-                                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                // Wait a bit for focus switch
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                                // Paste each clip sequentially
+                                for clip in &clips {
+                                    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+
+                                    if clip.clip_type == "text" || clip.clip_type == "html" || clip.clip_type == "url" {
+                                        let content_str = String::from_utf8_lossy(&clip.content).to_string();
+                                        let content_hash = crate::clipboard::calculate_hash(content_str.as_bytes());
+                                        crate::clipboard::set_ignore_hash(content_hash);
+
+                                        let mut success = false;
+                                        for i in 0..5 {
+                                            match write_text(content_str.clone()).await {
+                                                Ok(_) => { success = true; break; }
+                                                Err(e) => {
+                                                    log::warn!("paste_all: text write attempt {} failed: {}", i + 1, e);
+                                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                                }
+                                            }
+                                        }
+                                        if success {
+                                            crate::clipboard::send_paste_input();
+                                        }
+                                    } else if clip.clip_type == "image" {
+                                        let file_path: Option<String> =
+                                            sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
+                                                .bind(&clip.uuid)
+                                                .fetch_optional(pool)
+                                                .await
+                                                .unwrap_or(None)
+                                                .flatten();
+
+                                        if let Some(path) = file_path {
+                                            if !path.is_empty() {
+                                                let content_hash = clip.content_hash.clone();
+                                                crate::clipboard::set_ignore_hash(content_hash);
+
+                                                let mut success = false;
+                                                for i in 0..5 {
+                                                    match write_image(path.clone()).await {
+                                                        Ok(_) => { success = true; break; }
+                                                        Err(e) => {
+                                                            log::warn!("paste_all: image write attempt {} failed: {}", i + 1, e);
+                                                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                                        }
+                                                    }
+                                                }
+                                                if success {
+                                                    crate::clipboard::send_paste_input();
+                                                }
+                                            }
+                                        } else {
+                                            log::warn!("paste_all: skipping image clip {} - no file path", clip.uuid);
                                         }
                                     }
+
+                                    // Delay between pastes
+                                    drop(_guard);
+                                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                                 }
 
+                                // Restart monitor
                                 let app_clone = app.clone();
                                 if let Err(e) = start_listening(app_clone).await {
                                     log::error!("Failed to restart listener: {}", e);
-                                }
-
-                                if success {
-                                    let _ = app.emit("clipboard-write", &merged);
-                                    crate::clipboard::send_paste_input();
                                 }
                             }
                         });
